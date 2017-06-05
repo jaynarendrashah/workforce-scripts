@@ -111,6 +111,11 @@ def main(args):
     workers = []
     print("Extracting Data from Source")
     for worker in workers_in_source:
+        if worker.geometry is not None:
+            new_workers_geometry = dict(
+                x = worker.geometry["x"],
+                y = worker.geometry["y"]
+            )
         new_worker_attributes = dict(
             name=worker.attributes["name"],
             status=worker.attributes["status"],
@@ -118,7 +123,8 @@ def main(args):
             title=worker.attributes["title"],
             contactNumber=worker.attributes["contactNumber"]
         )
-        workers.append(arcgis.features.Feature(attributes=new_worker_attributes))
+        workers.append(arcgis.features.Feature(geometry=new_workers_geometry, attributes=new_worker_attributes))
+        new_workers_geometry = None
 
     print(workers)
 
