@@ -31,6 +31,9 @@ import sys
 import traceback
 import arcgis
 
+import json
+import requests
+
 def initialize_logger(logFile):
     # Format the logger
     # The format for the logs
@@ -56,27 +59,49 @@ def initialize_logger(logFile):
 def user_exists(gis, username):
     """
     Searchs the organization/portal to see if a user exists
-    :param gis: (GIS) The gis to use for searching
-    :param username: (string) The username to search for
-    :return: True if user exists, False if not
+    :param gis:                     (GIS) The gis to use for searching
+    :param username:                (string) The username to search for
+    :return:                        True if user exists, False if not
     """
     user_manager = arcgis.gis.UserManager(gis)
     users = user_manager.search(query=username)
     return username in [x["username"] for x in users]
 
-
-def filter_users(gis, project, features, feature_option):
+def filter_assignments(gis, workforce_project_data, feature_option, features):
     """
-    Ensures the worker is not already added and that the work has a named user
-    :param gis: (GIS) The gis to use for searching
-    :param projectId: (string) The project Id
-    :param workers: List<dict> The workers to add
-    :return: List<dict> The list of workers to add
+    Ensures the assignment is not already added
+    :param gis:                     (GIS) Authenticated GIS object
+    :param workforce_project_data:  (string) destination project data
+    :param feature_option:          (string) feature considered (workers, dispatchers or assignments)
+    :param features:                List<dict> The users to add
+    :return:                        List<dict> The list of users to add
     """
 
     # Grab the item
     logger = logging.getLogger()
-    features_in_fs = arcgis.features.FeatureLayer(project[feature_option]["url"], gis).query().features
+    features_in_fs = arcgis.features.FeatureLayer(workforce_project_data[feature_option]["url"], gis).query().features
+
+    features_to_add = []
+    for feature in features:
+        if feature.attributes["GlobalID"] in [f.attributes["GlobalID"] for f in features_in_fs]:
+            logger.warning("Assignments '{}' is already part of this project and will not be added".format(feature.attributes["GlobalID"]))
+        else:
+            features_to_add.append(feature)
+    return features_to_add
+
+def filter_users(gis, workforce_project_data, feature_option, features):
+    """
+    Ensures the worker is not already added and that the work has a named user
+    :param gis:                     (GIS) Authenticated GIS object
+    :param workforce_project_data:  (string) destination project data
+    :param feature_option:          (string) feature considered (workers, dispatchers or assignments)
+    :param features:                List<dict> The users to add
+    :return:                        List<dict> The list of users to add
+    """
+
+    # Grab the item
+    logger = logging.getLogger()
+    features_in_fs = arcgis.features.FeatureLayer(workforce_project_data[feature_option]["url"], gis).query().features
 
     features_to_add = []
     for feature in features:
@@ -88,25 +113,26 @@ def filter_users(gis, project, features, feature_option):
             features_to_add.append(feature)
     return features_to_add
 
-def write_to_destination(feature_option, features, workforce_project_data, gis):
+def write_to_destination(gis, workforce_project_data, feature_option, features):
 
     '''
-    :param feature_option:              feature considered (workers, dispatchers or assignments)
-    :param features:                    values from source
-    :param workforce_project_data:      destination project data
-    :param gis:                         Authenticated GIS object
+    :param gis:                         (GIS) Authenticated GIS object
+    :param workforce_project_data:      (string) destination project data
+    :param feature_option:              (string) feature considered (workers, dispatchers or assignments)
+    :param features:                    List<dict> values from source
+    :return:                            void
     '''
 
     logger = logging.getLogger()
     features_fl = arcgis.features.FeatureLayer(workforce_project_data[feature_option]["url"], gis)
 
-    # Validate/Filter each worker
+    # Validate/Filter each feature
     logger.info("Validating " + feature_option + "...")
 
     if(feature_option == "workers" or feature_option == "dispatchers"):
-        features = filter_users(gis, workforce_project_data, features, feature_option)
+        features = filter_users(gis, workforce_project_data, feature_option, features)
     if(feature_option == "assignments"):
-        print("This is an assignment")
+        features = filter_assignments(gis, workforce_project_data, feature_option, features)
 
     if features:
         logger.info("Adding " + feature_option + "...")
@@ -123,7 +149,16 @@ def write_to_destination(feature_option, features, workforce_project_data, gis):
     else:
         logger.info("There are no new and valid " + feature_option + " to add")
 
-def read_from_source(feature_option, workforce_project_data, gis):
+
+def read_from_source(gis, workforce_project_data, feature_option):
+    '''
+    :param gis:                         Authenticated GIS object
+    :param workforce_project_data:      destination project data
+    :param feature_option:              feature considered (workers, dispatchers or assignments)
+    :return:                            List<dict> The list of features from source
+    '''
+
+    logger = logging.getLogger()
     features_fl = arcgis.features.FeatureLayer(workforce_project_data[feature_option]["url"], gis)
 
     # Read Data from source and make a Feature Set
@@ -131,42 +166,68 @@ def read_from_source(feature_option, workforce_project_data, gis):
     features = []
     new_feature_geometry = None
 
-    print("Extracting " + feature_option + " Data from Source")
+    logger.info("Extracting " + feature_option + " data from source...")
+
     for feature in features_in_source:
         if feature.geometry is not None:
             new_feature_geometry = feature.geometry
         new_feature_attributes = feature.attributes
         features.append(arcgis.features.Feature(geometry=new_feature_geometry, attributes=new_feature_attributes))
         new_feature_geometry = None
-
     return features
 
+
 def main(args):
+
     # initialize logging
     logger = initialize_logger(args.logFile)
+
     # Create the GIS
     logger.info("Authenticating...")
     # First step is to get authenticate and get a valid token
     gis = arcgis.gis.GIS(args.org_url, username=args.username, password=args.password)
+    token = gis._con._token
+
 
     # Get the source project and data
     workforce_project = arcgis.gis.Item(gis, args.source_project_id)
-    logger.info("Reading Data from destination project")
+    logger.info("Connecting to source project")
     workforce_project_data = workforce_project.get_data()
 
+    # Reading Assignment Types from source
+    assignments_fl = arcgis.features.FeatureLayer(workforce_project_data["assignments"]["url"], gis)
+    assignmentTypeDefinition = assignments_fl.query().fields
+
+    # Checking if Assignment Types are present in Source Project
+    if(len(assignmentTypeDefinition) > 5):
+        assignmentTypeFlag = True
+        assignmentTypeDefinition = assignmentTypeDefinition[5]
+
     # Extracting different features from source
-    workers = read_from_source("workers", workforce_project_data, gis)
-    dispatchers = read_from_source("dispatchers", workforce_project_data, gis)
-    assignments = read_from_source("assignments", workforce_project_data, gis)
+    workers = read_from_source(gis, workforce_project_data, "workers")
+    dispatchers = read_from_source(gis, workforce_project_data, "dispatchers")
+    assignments = read_from_source(gis, workforce_project_data, "assignments")
+
 
     #Get the destination project and data
     workforce_project = arcgis.gis.Item(gis, args.destination_project_id)
-    logger.info("Reading Data from destination project")
+    logger.info("Connecting to destination project")
     workforce_project_data = workforce_project.get_data()
 
-    write_to_destination("workers", workers, workforce_project_data, gis)
-    write_to_destination("dispatchers", dispatchers, workforce_project_data, gis)
-    write_to_destination("assignments", assignments, workforce_project_data, gis)
+    # Writing Assignment Types to destination
+    if(assignmentTypeFlag):
+        url = workforce_project_data["assignments"]["url"]
+        url = url.replace("rest/services", "rest/admin/services") + "/updateDefinition"
+        updateDefinition = {"fields":[assignmentTypeDefinition]}
+        updateDefinition = json.dumps(updateDefinition)
+        data = {"updateDefinition": updateDefinition, "token": token, "f": "json"}
+        r = requests.post(url = url, data = data)
+        logger.info("Assignment Types Copied")
+
+    # Writing Features to destination
+    write_to_destination(gis, workforce_project_data, "workers", workers)
+    write_to_destination(gis, workforce_project_data, "dispatchers", dispatchers)
+    write_to_destination(gis, workforce_project_data, "assignments", assignments)
 
 
 if __name__ == "__main__":
