@@ -56,42 +56,64 @@ def initialize_logger(logFile):
     logger.addHandler(rh)
     return logger
 
-def user_exists(gis, username):
-    """
-    Searchs the organization/portal to see if a user exists
-    :param gis:                     (GIS) The gis to use for searching
-    :param username:                (string) The username to search for
-    :return:                        True if user exists, False if not
-    """
-    user_manager = arcgis.gis.UserManager(gis)
-    users = user_manager.search(query=username)
-    return username in [x["username"] for x in users]
+def read_from_source(gis, source_workforce_project_data, feature_option):
+    '''
+    :param gis:                         Authenticated GIS object
+    :param source_workforce_project_data:      source project data
+    :param feature_option:              feature considered (workers, dispatchers or assignments)
+    :return:                            List<dict> The list of features from source
+    '''
 
-def copy_relationship(gis, destination_workforce_project_data, source_workforce_project_data, source_assignments):
-    """
-    Ensures the assignment is not already added
-    :param gis:                     (GIS) Authenticated GIS object
-    :param destination_workforce_project_data:  (string) destination project data
-    :param source_assignments:      List<dict> source assignments
-    :param source_workers:          List<dict> The workers to add
-    :return:                        List<dict> The list of assignments to add
-    """
+    logger = logging.getLogger()
+    features_fl = arcgis.features.FeatureLayer(source_workforce_project_data[feature_option]["url"], gis)
+    source_features = features_fl.query().features
+    return source_features
 
-    source_workers = arcgis.features.FeatureLayer(source_workforce_project_data["workers"]["url"], gis).query().features
-    destination_workers = arcgis.features.FeatureLayer(destination_workforce_project_data["workers"]["url"], gis).query().features
+def write_to_destination(gis, destination_workforce_project_data, feature_option, source_features):
 
-    mapping_oid = {}
+    '''
+    :param gis:                         (GIS) Authenticated GIS object
+    :param destination_workforce_project_data:      (string) destination project data
+    :param feature_option:              (string) feature considered (workers, dispatchers or assignments)
+    :param source_features:             List<dict> values from source
+    :return:                            void
+    '''
 
-    for source_worker in source_workers:
-        for destination_worker in destination_workers:
-            if destination_worker.attributes["userId"] == source_worker.attributes["userId"]:
-                mapping_oid[source_worker.attributes["OBJECTID"]] = destination_worker.attributes["OBJECTID"]
+    logger = logging.getLogger()
+    features_fl = arcgis.features.FeatureLayer(destination_workforce_project_data[feature_option]["url"], gis)
 
-    for source_assignment in source_assignments:
-        source_assignment.attributes["workerId"] = mapping_oid[source_assignment.attributes["workerId"]]
+    # Validate/Filter each feature
+    logger.info("Validating " + feature_option + "...")
 
-    return source_assignments
+    if feature_option == "workers" or feature_option == "dispatchers":
+        source_features_to_add, source_features_to_update = filter_users(gis, destination_workforce_project_data, feature_option, source_features)
+        # print(source_features_to_add)
+        # print(source_features_to_update)
+    if feature_option == "assignments":
+        source_features_to_add, source_features_to_update = filter_assignments(gis, destination_workforce_project_data, feature_option, source_features)
 
+    if source_features_to_update:
+        logger.info("Updating " + feature_option + "...")
+
+        response = features_fl.edit_features(updates=arcgis.features.FeatureSet(source_features_to_update))
+        logger.info(response)
+
+    if source_features_to_add:
+        logger.info("Adding " + feature_option + "...")
+
+        response = features_fl.edit_features(adds=arcgis.features.FeatureSet(source_features_to_add), use_global_ids=True)
+        logger.info(response)
+
+        if feature_option == "workers" or feature_option == "dispatchers":
+            # Need to make sure the user is part of the workforce group
+            source_feature_ids = [f.attributes["userId"] for f in source_features_to_add]
+            group = arcgis.gis.Group(gis, destination_workforce_project_data["groupId"])
+            logger.info("Adding " + feature_option + " to project group...")
+            response = group.add_users(source_feature_ids)
+            logger.info(response)
+        logger.info("Completed")
+    else:
+        logger.info("There are no new and valid " + feature_option + " to add")
 
 def filter_assignments(gis, destination_workforce_project_data, feature_option, source_features):
     """
@@ -152,65 +174,88 @@ def filter_users(gis, destination_workforce_project_data, feature_option, source
                 features_to_add.append(source_feature)
     return features_to_add, features_to_update
 
-def write_to_destination(gis, destination_workforce_project_data, feature_option, source_features):
+def user_exists(gis, username):
+    """
+    Searchs the organization/portal to see if a user exists
+    :param gis:                     (GIS) The gis to use for searching
+    :param username:                (string) The username to search for
+    :return:                        True if user exists, False if not
+    """
+    user_manager = arcgis.gis.UserManager(gis)
+    users = user_manager.search(query=username)
+    return username in [x["username"] for x in users]
 
-    '''
-    :param gis:                         (GIS) Authenticated GIS object
-    :param destination_workforce_project_data:      (string) destination project data
-    :param feature_option:              (string) feature considered (workers, dispatchers or assignments)
-    :param source_features:             List<dict> values from source
-    :return:                            void
-    '''
+def copy_relationship(gis, source_workforce_project_data, destination_workforce_project_data, source_assignments):
+    """
+    Ensures the assignment is not already added
+    :param gis:                     (GIS) Authenticated GIS object
+    :param source_workforce_project_data:       (string) source project data
+    :param destination_workforce_project_data:  (string) destination project data
+    :param source_assignments:      List<dict> source assignments
+    :return:                        List<dict> The list of assignments to add
+    """
 
-    logger = logging.getLogger()
-    features_fl = arcgis.features.FeatureLayer(destination_workforce_project_data[feature_option]["url"], gis)
+    source_workers = arcgis.features.FeatureLayer(source_workforce_project_data["workers"]["url"], gis).query().features
+    destination_workers = arcgis.features.FeatureLayer(destination_workforce_project_data["workers"]["url"], gis).query().features
 
-    # Validate/Filter each feature
-    logger.info("Validating " + feature_option + "...")
+    mapping_oid = {}
 
-    if feature_option == "workers" or feature_option == "dispatchers":
-        source_features_to_add, source_features_to_update = filter_users(gis, destination_workforce_project_data, feature_option, source_features)
-        # print(source_features_to_add)
-        # print(source_features_to_update)
-    if feature_option == "assignments":
-        source_features_to_add, source_features_to_update = filter_assignments(gis, destination_workforce_project_data, feature_option, source_features)
+    for source_worker in source_workers:
+        for destination_worker in destination_workers:
+            if destination_worker.attributes["userId"] == source_worker.attributes["userId"]:
+                mapping_oid[source_worker.attributes["OBJECTID"]] = destination_worker.attributes["OBJECTID"]
 
-    if source_features_to_update:
-        logger.info("Updating " + feature_option + "...")
-
-        response = features_fl.edit_features(updates=arcgis.features.FeatureSet(source_features_to_update))
-        logger.info(response)
-
-    if source_features_to_add:
-        logger.info("Adding " + feature_option + "...")
-
-        response = features_fl.edit_features(adds=arcgis.features.FeatureSet(source_features_to_add), use_global_ids=True)
-        logger.info(response)
-
-        if feature_option == "workers" or feature_option == "dispatchers":
-            # Need to make sure the user is part of the workforce group
-            source_feature_ids = [f.attributes["userId"] for f in source_features_to_add]
-            group = arcgis.gis.Group(gis, destination_workforce_project_data["groupId"])
-            logger.info("Adding " + feature_option + " to project group...")
-            response = group.add_users(source_feature_ids)
-            logger.info(response)
-        logger.info("Completed")
-    else:
-        logger.info("There are no new and valid " + feature_option + " to add")
+    for source_assignment in source_assignments:
+        if source_assignment.attributes["workerId"]:
+            source_assignment.attributes["workerId"] = mapping_oid[source_assignment.attributes["workerId"]]
 
 
-def read_from_source(gis, source_workforce_project_data, feature_option):
-    '''
-    :param gis:                         Authenticated GIS object
-    :param source_workforce_project_data:      source project data
-    :param feature_option:              feature considered (workers, dispatchers or assignments)
-    :return:                            List<dict> The list of features from source
-    '''
+    source_dispatchers = arcgis.features.FeatureLayer(source_workforce_project_data["dispatchers"]["url"], gis).query().features
+    destination_dispatchers = arcgis.features.FeatureLayer(destination_workforce_project_data["dispatchers"]["url"], gis).query().features
 
-    logger = logging.getLogger()
-    features_fl = arcgis.features.FeatureLayer(source_workforce_project_data[feature_option]["url"], gis)
-    source_features = features_fl.query().features
-    return source_features
+    mapping_oid = {}
+
+    for source_dispatcher in source_dispatchers:
+        for destination_dispatcher in destination_dispatchers:
+            if destination_dispatcher.attributes["userId"] == source_dispatcher.attributes["userId"]:
+                mapping_oid[source_dispatcher.attributes["OBJECTID"]] = destination_dispatcher.attributes["OBJECTID"]
+
+    for source_assignment in source_assignments:
+        if source_assignment.attributes["dispatcherId"]:
+            source_assignment.attributes["dispatcherId"] = mapping_oid[source_assignment.attributes["dispatcherId"]]
+
+    return source_assignments
+
+
+def edit_web_map_obj(source_web_map_obj, destination_web_map_obj, source_workforce_project_data, destination_workforce_project_data):
+    """
+    Ensures the assignment is not already added
+    :param source_web_map_obj:                  (WebMap) Source WebMap object
+    :param destination_web_map_obj:             (WebMap) Destination WebMap object
+    :param source_workforce_project_data:       (string) source project data
+    :param destination_workforce_project_data:  (string) destination project data
+    :return:                                    (WebMap) Updated Destination WebMap object
+    """
+
+    # copying to local copy - destination_web_map_obj
+    source_web_map_dict = dict(source_web_map_obj)
+    for key in source_web_map_dict:
+        destination_web_map_obj[key] = source_web_map_obj[key]
+
+    # Changing urls pointing to feature layers in destination
+    feature_options = ["assignments", "workers", "dispatchers", "tracks"]
+    for operationalLayer in destination_web_map_obj["operationalLayers"]:
+        if operationalLayer["url"]:
+            operationalLayer_url = operationalLayer["url"]
+            operationalLayer_url = operationalLayer_url.replace("https:/", "http:/")
+
+            for feature_option in feature_options:
+                source_feature_url = source_workforce_project_data[feature_option]["url"]
+                source_feature_url = source_feature_url.replace("https:/", "http:/")
+                if operationalLayer_url == source_feature_url:
+                    operationalLayer["url"] = destination_workforce_project_data[feature_option]["url"]
+
+    return destination_web_map_obj
 
 
 def main(args):
@@ -222,8 +267,9 @@ def main(args):
     logger.info("Authenticating...")
     # First step is to get authenticate and get a valid token
     gis = arcgis.gis.GIS(args.org_url, username=args.username, password=args.password)
-    token = gis._con._token
 
+    # HACK: We are using private API to get the token, we uae the token to access the REST API directly
+    token = gis._con._token
 
     # Get the source project and data
     source_workforce_project = arcgis.gis.Item(gis, args.source_project_id)
@@ -233,11 +279,6 @@ def main(args):
     # Reading Assignment Types from source
     source_assignments_fl = arcgis.features.FeatureLayer(source_workforce_project_data["assignments"]["url"], gis)
     source_assignment_type_definition = source_assignments_fl.query().fields
-
-    # Checking if Assignment Types are present in Source Project
-    # if len(source_assignmentTypeDefinition) > 5:
-    #     source_assignmentTypeFlag = True
-    #     source_assignmentTypeDefinition = source_assignmentTypeDefinition[5]
 
     source_assignment_type_flag = False
     if type(source_assignment_type_definition)==list:
@@ -252,6 +293,13 @@ def main(args):
     source_dispatchers = read_from_source(gis, source_workforce_project_data, "dispatchers")
     source_assignments = read_from_source(gis, source_workforce_project_data, "assignments")
 
+    source_worker_web_map_item = gis.content.get(source_workforce_project_data["workerWebMapId"])
+    source_worker_web_map_item_extent = source_worker_web_map_item.extent
+    source_worker_web_map_obj = arcgis.mapping.WebMap(source_worker_web_map_item)
+
+    source_dispatcher_web_map_item = gis.content.get(source_workforce_project_data["dispatcherWebMapId"])
+    source_dispatcher_web_map_item_extent = source_dispatcher_web_map_item.extent
+    source_dispatcher_web_map_obj = arcgis.mapping.WebMap(source_dispatcher_web_map_item)
 
     #Get the destination project and data
     destination_workforce_project = arcgis.gis.Item(gis, args.destination_project_id)
@@ -275,11 +323,35 @@ def main(args):
     write_to_destination(gis, destination_workforce_project_data, "workers", source_workers)
     write_to_destination(gis, destination_workforce_project_data, "dispatchers", source_dispatchers)
     if source_assignments:
-        source_assignments = copy_relationship(gis, destination_workforce_project_data, source_workforce_project_data, source_assignments)
+        source_assignments = copy_relationship(gis, source_workforce_project_data, destination_workforce_project_data, source_assignments)
     else:
-        print("Empty source assignments")
-        print(source_assignments)
+        logger.info("Empty source assignments")
+        logger.info(source_assignments)
     write_to_destination(gis, destination_workforce_project_data, "assignments", source_assignments)
+
+    # Copyting Assignment Integrations to destination
+    logger.info("Copying Assignment Integrations...")
+    destination_workforce_project_data["assignmentIntegrations"] = source_workforce_project_data["assignmentIntegrations"]
+    status = destination_workforce_project.update(item_properties={"text":json.dumps(destination_workforce_project_data)})
+    logger.info("Copying Assignment Integrations Status: " + str(status))
+
+    # Copying Web Maps
+    logger.info("Copying Web Maps")
+
+    destination_worker_web_map_item = gis.content.get(destination_workforce_project_data["workerWebMapId"])
+    status = destination_worker_web_map_item.update(item_properties={"extent": source_worker_web_map_item_extent})
+    destination_worker_web_map_obj = arcgis.mapping.WebMap(destination_worker_web_map_item)
+
+    destination_dispatcher_web_map_item = gis.content.get(destination_workforce_project_data["dispatcherWebMapId"])
+    status = destination_dispatcher_web_map_item.update(item_properties={"extent": source_dispatcher_web_map_item_extent})
+    destination_dispatcher_web_map_obj = arcgis.mapping.WebMap(destination_dispatcher_web_map_item)
+
+    destination_worker_web_map_obj = edit_web_map_obj(source_worker_web_map_obj, destination_worker_web_map_obj, source_workforce_project_data, destination_workforce_project_data)
+    destination_worker_web_map_obj.update()
+
+    destination_dispatcher_web_map_obj = edit_web_map_obj(source_dispatcher_web_map_obj, destination_dispatcher_web_map_obj, source_workforce_project_data, destination_workforce_project_data)
+    destination_dispatcher_web_map_obj.update()
+
 
 
 if __name__ == "__main__":
