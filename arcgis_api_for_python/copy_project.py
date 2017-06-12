@@ -86,11 +86,10 @@ def write_to_destination(gis, destination_workforce_project_data, feature_option
     logger.info("Validating " + feature_option + "...")
 
     if feature_option == "workers" or feature_option == "dispatchers":
-        source_features_to_add, source_features_to_update = filter_users(gis, destination_workforce_project_data, feature_option, source_features)
-        # print(source_features_to_add)
-        # print(source_features_to_update)
-    if feature_option == "assignments":
-        source_features_to_add, source_features_to_update = filter_assignments(gis, destination_workforce_project_data, feature_option, source_features)
+        source_features_to_add, source_features_to_update = filter_by_user_id(gis, destination_workforce_project_data, feature_option, source_features)
+
+    if feature_option == "assignments" or feature_option == "tracks":
+        source_features_to_add, source_features_to_update = filter_by_global_id(gis, destination_workforce_project_data, feature_option, source_features)
 
     if source_features_to_update:
         logger.info("Updating " + feature_option + "...")
@@ -115,7 +114,7 @@ def write_to_destination(gis, destination_workforce_project_data, feature_option
     else:
         logger.info("There are no new and valid " + feature_option + " to add")
 
-def filter_assignments(gis, destination_workforce_project_data, feature_option, source_features):
+def filter_by_global_id(gis, destination_workforce_project_data, feature_option, source_features):
     """
     Ensures the assignment is not already added
     :param gis:                     (GIS) Authenticated GIS object
@@ -143,7 +142,7 @@ def filter_assignments(gis, destination_workforce_project_data, feature_option, 
             features_to_add.append(source_feature)
     return features_to_add, features_to_update
 
-def filter_users(gis, destination_workforce_project_data, feature_option, source_features):
+def filter_by_user_id(gis, destination_workforce_project_data, feature_option, source_features):
     """
     Ensures the worker is not already added and that the work has a named user
     :param gis:                     (GIS) Authenticated GIS object
@@ -291,6 +290,7 @@ def main(args):
     # Extracting different features from source
     source_workers = read_from_source(gis, source_workforce_project_data, "workers")
     source_dispatchers = read_from_source(gis, source_workforce_project_data, "dispatchers")
+    source_tracks = read_from_source(gis, source_workforce_project_data, "tracks")
     source_assignments = read_from_source(gis, source_workforce_project_data, "assignments")
 
     source_worker_web_map_item = gis.content.get(source_workforce_project_data["workerWebMapId"])
@@ -322,6 +322,8 @@ def main(args):
     # Writing Features to destination
     write_to_destination(gis, destination_workforce_project_data, "workers", source_workers)
     write_to_destination(gis, destination_workforce_project_data, "dispatchers", source_dispatchers)
+    write_to_destination(gis, destination_workforce_project_data, "tracks", source_tracks)
+
     if source_assignments:
         source_assignments = copy_relationship(gis, source_workforce_project_data, destination_workforce_project_data, source_assignments)
     else:
@@ -329,11 +331,14 @@ def main(args):
         logger.info(source_assignments)
     write_to_destination(gis, destination_workforce_project_data, "assignments", source_assignments)
 
-    # Copyting Assignment Integrations to destination
+    # Copyting Assignment Integrations to destination and enabling/disabling tracking
     logger.info("Copying Assignment Integrations...")
     destination_workforce_project_data["assignmentIntegrations"] = source_workforce_project_data["assignmentIntegrations"]
+    destination_workforce_project_data["tracks"]["enabled"] = source_workforce_project_data["tracks"]["enabled"]
+    destination_workforce_project_data["tracks"]["updateInterval"] = source_workforce_project_data["tracks"]["updateInterval"]
     status = destination_workforce_project.update(item_properties={"text":json.dumps(destination_workforce_project_data)})
     logger.info("Copying Assignment Integrations Status: " + str(status))
+
 
     # Copying Web Maps
     logger.info("Copying Web Maps")
